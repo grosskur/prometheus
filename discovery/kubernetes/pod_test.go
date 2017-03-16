@@ -15,10 +15,12 @@ package kubernetes
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
+	"k8s.io/client-go/1.5/pkg/api/unversioned"
 	"k8s.io/client-go/1.5/pkg/api/v1"
 	"k8s.io/client-go/1.5/tools/cache"
 )
@@ -31,15 +33,26 @@ func newFakePodInformer() *fakeInformer {
 	return newFakeInformer(podStoreKeyFunc)
 }
 
-func makeTestPodDiscovery() (*Pod, *fakeInformer) {
+func namespaceStoreKeyFunc(obj interface{}) (string, error) {
+	return obj.(*v1.Namespace).ObjectMeta.Name, nil
+}
+
+func newFakeNamespaceInformer() *fakeInformer {
+	return newFakeInformer(namespaceStoreKeyFunc)
+}
+
+func makeTestPodDiscovery() (*Pod, *fakeInformer, *fakeInformer, *fakeInformer) {
 	i := newFakePodInformer()
-	return NewPod(log.Base(), i), i
+	j := newFakeNodeInformer()
+	k := newFakeNamespaceInformer()
+	return NewPod(log.Base(), i, j, k), i, j, k
 }
 
 func makeMultiPortPod() *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: v1.ObjectMeta{
 			Name:        "testpod",
+			UID:         "e4c35dec-836e-4931-83c6-13b9dbf39b18",
 			Namespace:   "default",
 			Labels:      map[string]string{"testlabel": "testvalue"},
 			Annotations: map[string]string{"testannotation": "testannotationvalue"},
@@ -68,8 +81,9 @@ func makeMultiPortPod() *v1.Pod {
 			},
 		},
 		Status: v1.PodStatus{
-			PodIP:  "1.2.3.4",
-			HostIP: "2.3.4.5",
+			PodIP:     "1.2.3.4",
+			HostIP:    "2.3.4.5",
+			StartTime: &unversioned.Time{Time: time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)},
 			Conditions: []v1.PodCondition{
 				{
 					Type:   v1.PodReady,
@@ -84,6 +98,7 @@ func makePod() *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      "testpod",
+			UID:       "e4c35dec-836e-4931-83c6-13b9dbf39b18",
 			Namespace: "default",
 		},
 		Spec: v1.PodSpec{
@@ -102,8 +117,9 @@ func makePod() *v1.Pod {
 			},
 		},
 		Status: v1.PodStatus{
-			PodIP:  "1.2.3.4",
-			HostIP: "2.3.4.5",
+			PodIP:     "1.2.3.4",
+			HostIP:    "2.3.4.5",
+			StartTime: &unversioned.Time{Time: time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)},
 			Conditions: []v1.PodCondition{
 				{
 					Type:   v1.PodReady,
@@ -114,9 +130,33 @@ func makePod() *v1.Pod {
 	}
 }
 
+func makeSimpleNode() *v1.Node {
+	return &v1.Node{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      "testnode",
+			Namespace: "default",
+		},
+		Spec: v1.NodeSpec{
+			ExternalID: "123456",
+			ProviderID: "test://testproject/testzone/testnode",
+		},
+	}
+}
+
+func makeSimpleNamespace() *v1.Namespace {
+	return &v1.Namespace{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "default",
+			UID:  "12345678-1234-1234-1234-123456789012",
+		},
+	}
+}
+
 func TestPodDiscoveryInitial(t *testing.T) {
-	n, i := makeTestPodDiscovery()
+	n, i, j, k := makeTestPodDiscovery()
 	i.GetStore().Add(makeMultiPortPod())
+	j.GetStore().Add(makeSimpleNode())
+	k.GetStore().Add(makeSimpleNamespace())
 
 	k8sDiscoveryTest{
 		discovery: n,
@@ -144,10 +184,15 @@ func TestPodDiscoveryInitial(t *testing.T) {
 				},
 				Labels: model.LabelSet{
 					"__meta_kubernetes_pod_name":                      "testpod",
+					"__meta_kubernetes_pod_uid":                       "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":                "1970-01-01 00:00:00 +0000 UTC",
 					"__meta_kubernetes_namespace":                     "default",
+					"__meta_kubernetes_namespace_uid":                 "12345678-1234-1234-1234-123456789012",
 					"__meta_kubernetes_pod_label_testlabel":           "testvalue",
 					"__meta_kubernetes_pod_annotation_testannotation": "testannotationvalue",
 					"__meta_kubernetes_pod_node_name":                 "testnode",
+					"__meta_kubernetes_pod_node_external_id":          "123456",
+					"__meta_kubernetes_pod_node_provider_id":          "test://testproject/testzone/testnode",
 					"__meta_kubernetes_pod_ip":                        "1.2.3.4",
 					"__meta_kubernetes_pod_host_ip":                   "2.3.4.5",
 					"__meta_kubernetes_pod_ready":                     "true",
@@ -159,7 +204,9 @@ func TestPodDiscoveryInitial(t *testing.T) {
 }
 
 func TestPodDiscoveryAdd(t *testing.T) {
-	n, i := makeTestPodDiscovery()
+	n, i, j, k := makeTestPodDiscovery()
+	j.GetStore().Add(makeSimpleNode())
+	k.GetStore().Add(makeSimpleNamespace())
 
 	k8sDiscoveryTest{
 		discovery:  n,
@@ -176,12 +223,17 @@ func TestPodDiscoveryAdd(t *testing.T) {
 					},
 				},
 				Labels: model.LabelSet{
-					"__meta_kubernetes_pod_name":      "testpod",
-					"__meta_kubernetes_namespace":     "default",
-					"__meta_kubernetes_pod_node_name": "testnode",
-					"__meta_kubernetes_pod_ip":        "1.2.3.4",
-					"__meta_kubernetes_pod_host_ip":   "2.3.4.5",
-					"__meta_kubernetes_pod_ready":     "true",
+					"__meta_kubernetes_pod_name":             "testpod",
+					"__meta_kubernetes_pod_uid":              "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":       "1970-01-01 00:00:00 +0000 UTC",
+					"__meta_kubernetes_namespace":            "default",
+					"__meta_kubernetes_namespace_uid":        "12345678-1234-1234-1234-123456789012",
+					"__meta_kubernetes_pod_node_name":        "testnode",
+					"__meta_kubernetes_pod_node_external_id": "123456",
+					"__meta_kubernetes_pod_node_provider_id": "test://testproject/testzone/testnode",
+					"__meta_kubernetes_pod_ip":               "1.2.3.4",
+					"__meta_kubernetes_pod_host_ip":          "2.3.4.5",
+					"__meta_kubernetes_pod_ready":            "true",
 				},
 				Source: "pod/default/testpod",
 			},
@@ -190,8 +242,10 @@ func TestPodDiscoveryAdd(t *testing.T) {
 }
 
 func TestPodDiscoveryDelete(t *testing.T) {
-	n, i := makeTestPodDiscovery()
+	n, i, j, k := makeTestPodDiscovery()
 	i.GetStore().Add(makePod())
+	j.GetStore().Add(makeSimpleNode())
+	k.GetStore().Add(makeSimpleNamespace())
 
 	k8sDiscoveryTest{
 		discovery:  n,
@@ -208,12 +262,17 @@ func TestPodDiscoveryDelete(t *testing.T) {
 					},
 				},
 				Labels: model.LabelSet{
-					"__meta_kubernetes_pod_name":      "testpod",
-					"__meta_kubernetes_namespace":     "default",
-					"__meta_kubernetes_pod_node_name": "testnode",
-					"__meta_kubernetes_pod_ip":        "1.2.3.4",
-					"__meta_kubernetes_pod_host_ip":   "2.3.4.5",
-					"__meta_kubernetes_pod_ready":     "true",
+					"__meta_kubernetes_pod_name":             "testpod",
+					"__meta_kubernetes_pod_uid":              "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":       "1970-01-01 00:00:00 +0000 UTC",
+					"__meta_kubernetes_namespace":            "default",
+					"__meta_kubernetes_namespace_uid":        "12345678-1234-1234-1234-123456789012",
+					"__meta_kubernetes_pod_node_name":        "testnode",
+					"__meta_kubernetes_pod_node_external_id": "123456",
+					"__meta_kubernetes_pod_node_provider_id": "test://testproject/testzone/testnode",
+					"__meta_kubernetes_pod_ip":               "1.2.3.4",
+					"__meta_kubernetes_pod_host_ip":          "2.3.4.5",
+					"__meta_kubernetes_pod_ready":            "true",
 				},
 				Source: "pod/default/testpod",
 			},
@@ -227,8 +286,10 @@ func TestPodDiscoveryDelete(t *testing.T) {
 }
 
 func TestPodDiscoveryDeleteUnknownCacheState(t *testing.T) {
-	n, i := makeTestPodDiscovery()
+	n, i, j, k := makeTestPodDiscovery()
 	i.GetStore().Add(makePod())
+	j.GetStore().Add(makeSimpleNode())
+	k.GetStore().Add(makeSimpleNamespace())
 
 	k8sDiscoveryTest{
 		discovery:  n,
@@ -245,12 +306,17 @@ func TestPodDiscoveryDeleteUnknownCacheState(t *testing.T) {
 					},
 				},
 				Labels: model.LabelSet{
-					"__meta_kubernetes_pod_name":      "testpod",
-					"__meta_kubernetes_namespace":     "default",
-					"__meta_kubernetes_pod_node_name": "testnode",
-					"__meta_kubernetes_pod_ip":        "1.2.3.4",
-					"__meta_kubernetes_pod_host_ip":   "2.3.4.5",
-					"__meta_kubernetes_pod_ready":     "true",
+					"__meta_kubernetes_pod_name":             "testpod",
+					"__meta_kubernetes_pod_uid":              "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":       "1970-01-01 00:00:00 +0000 UTC",
+					"__meta_kubernetes_namespace":            "default",
+					"__meta_kubernetes_namespace_uid":        "12345678-1234-1234-1234-123456789012",
+					"__meta_kubernetes_pod_node_name":        "testnode",
+					"__meta_kubernetes_pod_node_external_id": "123456",
+					"__meta_kubernetes_pod_node_provider_id": "test://testproject/testzone/testnode",
+					"__meta_kubernetes_pod_ip":               "1.2.3.4",
+					"__meta_kubernetes_pod_host_ip":          "2.3.4.5",
+					"__meta_kubernetes_pod_ready":            "true",
 				},
 				Source: "pod/default/testpod",
 			},
@@ -264,10 +330,11 @@ func TestPodDiscoveryDeleteUnknownCacheState(t *testing.T) {
 }
 
 func TestPodDiscoveryUpdate(t *testing.T) {
-	n, i := makeTestPodDiscovery()
+	n, i, j, k := makeTestPodDiscovery()
 	i.GetStore().Add(&v1.Pod{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      "testpod",
+			UID:       "e4c35dec-836e-4931-83c6-13b9dbf39b18",
 			Namespace: "default",
 		},
 		Spec: v1.PodSpec{
@@ -286,10 +353,13 @@ func TestPodDiscoveryUpdate(t *testing.T) {
 			},
 		},
 		Status: v1.PodStatus{
-			PodIP:  "1.2.3.4",
-			HostIP: "2.3.4.5",
+			PodIP:     "1.2.3.4",
+			HostIP:    "2.3.4.5",
+			StartTime: &unversioned.Time{Time: time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)},
 		},
 	})
+	j.GetStore().Add(makeSimpleNode())
+	k.GetStore().Add(makeSimpleNamespace())
 
 	k8sDiscoveryTest{
 		discovery:  n,
@@ -306,12 +376,17 @@ func TestPodDiscoveryUpdate(t *testing.T) {
 					},
 				},
 				Labels: model.LabelSet{
-					"__meta_kubernetes_pod_name":      "testpod",
-					"__meta_kubernetes_namespace":     "default",
-					"__meta_kubernetes_pod_node_name": "testnode",
-					"__meta_kubernetes_pod_ip":        "1.2.3.4",
-					"__meta_kubernetes_pod_host_ip":   "2.3.4.5",
-					"__meta_kubernetes_pod_ready":     "unknown",
+					"__meta_kubernetes_pod_name":             "testpod",
+					"__meta_kubernetes_pod_uid":              "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":       "1970-01-01 00:00:00 +0000 UTC",
+					"__meta_kubernetes_namespace":            "default",
+					"__meta_kubernetes_namespace_uid":        "12345678-1234-1234-1234-123456789012",
+					"__meta_kubernetes_pod_node_name":        "testnode",
+					"__meta_kubernetes_pod_node_external_id": "123456",
+					"__meta_kubernetes_pod_node_provider_id": "test://testproject/testzone/testnode",
+					"__meta_kubernetes_pod_ip":               "1.2.3.4",
+					"__meta_kubernetes_pod_host_ip":          "2.3.4.5",
+					"__meta_kubernetes_pod_ready":            "unknown",
 				},
 				Source: "pod/default/testpod",
 			},
@@ -328,12 +403,17 @@ func TestPodDiscoveryUpdate(t *testing.T) {
 					},
 				},
 				Labels: model.LabelSet{
-					"__meta_kubernetes_pod_name":      "testpod",
-					"__meta_kubernetes_namespace":     "default",
-					"__meta_kubernetes_pod_node_name": "testnode",
-					"__meta_kubernetes_pod_ip":        "1.2.3.4",
-					"__meta_kubernetes_pod_host_ip":   "2.3.4.5",
-					"__meta_kubernetes_pod_ready":     "true",
+					"__meta_kubernetes_pod_name":             "testpod",
+					"__meta_kubernetes_pod_uid":              "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+					"__meta_kubernetes_pod_start_time":       "1970-01-01 00:00:00 +0000 UTC",
+					"__meta_kubernetes_namespace":            "default",
+					"__meta_kubernetes_namespace_uid":        "12345678-1234-1234-1234-123456789012",
+					"__meta_kubernetes_pod_node_name":        "testnode",
+					"__meta_kubernetes_pod_node_external_id": "123456",
+					"__meta_kubernetes_pod_node_provider_id": "test://testproject/testzone/testnode",
+					"__meta_kubernetes_pod_ip":               "1.2.3.4",
+					"__meta_kubernetes_pod_host_ip":          "2.3.4.5",
+					"__meta_kubernetes_pod_ready":            "true",
 				},
 				Source: "pod/default/testpod",
 			},

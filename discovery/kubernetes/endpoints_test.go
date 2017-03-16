@@ -15,10 +15,12 @@ package kubernetes
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/log"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
+	"k8s.io/client-go/1.5/pkg/api/unversioned"
 	"k8s.io/client-go/1.5/pkg/api/v1"
 	"k8s.io/client-go/1.5/tools/cache"
 )
@@ -125,6 +127,7 @@ func TestEndpointsDiscoveryAdd(t *testing.T) {
 	pods.GetStore().Add(&v1.Pod{
 		ObjectMeta: v1.ObjectMeta{
 			Name:      "testpod",
+			UID:       "e4c35dec-836e-4931-83c6-13b9dbf39b18",
 			Namespace: "default",
 		},
 		Spec: v1.PodSpec{
@@ -153,8 +156,9 @@ func TestEndpointsDiscoveryAdd(t *testing.T) {
 			},
 		},
 		Status: v1.PodStatus{
-			HostIP: "2.3.4.5",
-			PodIP:  "1.2.3.4",
+			HostIP:    "2.3.4.5",
+			PodIP:     "1.2.3.4",
+			StartTime: &unversioned.Time{Time: time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)},
 		},
 	})
 
@@ -202,6 +206,8 @@ func TestEndpointsDiscoveryAdd(t *testing.T) {
 						"__meta_kubernetes_endpoint_port_protocol":      "TCP",
 						"__meta_kubernetes_endpoint_ready":              "true",
 						"__meta_kubernetes_pod_name":                    "testpod",
+						"__meta_kubernetes_pod_uid":                     "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+						"__meta_kubernetes_pod_start_time":              "1970-01-01 00:00:00 +0000 UTC",
 						"__meta_kubernetes_pod_ip":                      "1.2.3.4",
 						"__meta_kubernetes_pod_ready":                   "unknown",
 						"__meta_kubernetes_pod_node_name":               "testnode",
@@ -214,6 +220,8 @@ func TestEndpointsDiscoveryAdd(t *testing.T) {
 					{
 						"__address__":                                   "1.2.3.4:9001",
 						"__meta_kubernetes_pod_name":                    "testpod",
+						"__meta_kubernetes_pod_uid":                     "e4c35dec-836e-4931-83c6-13b9dbf39b18",
+						"__meta_kubernetes_pod_start_time":              "1970-01-01 00:00:00 +0000 UTC",
 						"__meta_kubernetes_pod_ip":                      "1.2.3.4",
 						"__meta_kubernetes_pod_ready":                   "unknown",
 						"__meta_kubernetes_pod_node_name":               "testnode",

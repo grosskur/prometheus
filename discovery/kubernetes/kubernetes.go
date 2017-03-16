@@ -34,8 +34,9 @@ import (
 const (
 	// kubernetesMetaLabelPrefix is the meta prefix used for all meta labels.
 	// in this discovery.
-	metaLabelPrefix = model.MetaLabelPrefix + "kubernetes_"
-	namespaceLabel  = metaLabelPrefix + "namespace"
+	metaLabelPrefix   = model.MetaLabelPrefix + "kubernetes_"
+	namespaceLabel    = metaLabelPrefix + "namespace"
+	namespaceUIDLabel = metaLabelPrefix + "namespace_uid"
 )
 
 var (
@@ -177,13 +178,25 @@ func (d *Discovery) Run(ctx context.Context, ch chan<- []*config.TargetGroup) {
 
 	case "pod":
 		plw := cache.NewListWatchFromClient(rclient, "pods", api.NamespaceAll, nil)
+		nlw := cache.NewListWatchFromClient(rclient, "nodes", api.NamespaceAll, nil)
+		nslw := cache.NewListWatchFromClient(rclient, "namespaces", api.NamespaceAll, nil)
 		pod := NewPod(
 			d.logger.With("kubernetes_sd", "pod"),
 			cache.NewSharedInformer(plw, &apiv1.Pod{}, resyncPeriod),
+			cache.NewSharedInformer(nlw, &apiv1.Node{}, resyncPeriod),
+			cache.NewSharedInformer(nslw, &apiv1.Namespace{}, resyncPeriod),
 		)
-		go pod.informer.Run(ctx.Done())
+		go pod.podInf.Run(ctx.Done())
+		go pod.nodeInf.Run(ctx.Done())
+		go pod.namespaceInf.Run(ctx.Done())
 
-		for !pod.informer.HasSynced() {
+		for !pod.podInf.HasSynced() {
+			time.Sleep(100 * time.Millisecond)
+		}
+		for !pod.nodeInf.HasSynced() {
+			time.Sleep(100 * time.Millisecond)
+		}
+		for !pod.namespaceInf.HasSynced() {
 			time.Sleep(100 * time.Millisecond)
 		}
 		pod.Run(ctx, ch)

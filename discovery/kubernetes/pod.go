@@ -31,17 +31,27 @@ import (
 
 // Pod discovers new pod targets.
 type Pod struct {
-	informer cache.SharedInformer
-	store    cache.Store
-	logger   log.Logger
+	podInf       cache.SharedInformer
+	nodeInf      cache.SharedInformer
+	namespaceInf cache.SharedInformer
+
+	podStore       cache.Store
+	nodeStore      cache.Store
+	namespaceStore cache.Store
+
+	logger log.Logger
 }
 
 // NewPod creates a new pod discovery.
-func NewPod(l log.Logger, pods cache.SharedInformer) *Pod {
+func NewPod(l log.Logger, pods, nodes, namespaces cache.SharedInformer) *Pod {
 	return &Pod{
-		informer: pods,
-		store:    pods.GetStore(),
-		logger:   l,
+		podInf:         pods,
+		podStore:       pods.GetStore(),
+		nodeInf:        nodes,
+		nodeStore:      nodes.GetStore(),
+		namespaceInf:   namespaces,
+		namespaceStore: namespaces.GetStore(),
+		logger:         l,
 	}
 }
 
@@ -49,7 +59,7 @@ func NewPod(l log.Logger, pods cache.SharedInformer) *Pod {
 func (p *Pod) Run(ctx context.Context, ch chan<- []*config.TargetGroup) {
 	// Send full initial set of pod targets.
 	var initial []*config.TargetGroup
-	for _, o := range p.store.List() {
+	for _, o := range p.podStore.List() {
 		tg := p.buildPod(o.(*apiv1.Pod))
 		initial = append(initial, tg)
 
@@ -69,7 +79,7 @@ func (p *Pod) Run(ctx context.Context, ch chan<- []*config.TargetGroup) {
 		case ch <- []*config.TargetGroup{tg}:
 		}
 	}
-	p.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	p.podInf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(o interface{}) {
 			eventCount.WithLabelValues("pod", "add").Inc()
 
@@ -124,6 +134,8 @@ func convertToPod(o interface{}) (*apiv1.Pod, error) {
 
 const (
 	podNameLabel                  = metaLabelPrefix + "pod_name"
+	podUIDLabel                   = metaLabelPrefix + "pod_uid"
+	podStartTimeLabel             = metaLabelPrefix + "pod_start_time"
 	podIPLabel                    = metaLabelPrefix + "pod_ip"
 	podContainerNameLabel         = metaLabelPrefix + "pod_container_name"
 	podContainerPortNameLabel     = metaLabelPrefix + "pod_container_port_name"
@@ -133,16 +145,20 @@ const (
 	podLabelPrefix                = metaLabelPrefix + "pod_label_"
 	podAnnotationPrefix           = metaLabelPrefix + "pod_annotation_"
 	podNodeNameLabel              = metaLabelPrefix + "pod_node_name"
+	podNodeExternalIDLabel        = metaLabelPrefix + "pod_node_external_id"
+	podNodeProviderIDLabel        = metaLabelPrefix + "pod_node_provider_id"
 	podHostIPLabel                = metaLabelPrefix + "pod_host_ip"
 )
 
 func podLabels(pod *apiv1.Pod) model.LabelSet {
 	ls := model.LabelSet{
-		podNameLabel:     lv(pod.ObjectMeta.Name),
-		podIPLabel:       lv(pod.Status.PodIP),
-		podReadyLabel:    podReady(pod),
-		podNodeNameLabel: lv(pod.Spec.NodeName),
-		podHostIPLabel:   lv(pod.Status.HostIP),
+		podNameLabel:      lv(pod.ObjectMeta.Name),
+		podUIDLabel:       lv(string(pod.ObjectMeta.UID)),
+		podStartTimeLabel: lv(pod.Status.StartTime.String()),
+		podIPLabel:        lv(pod.Status.PodIP),
+		podReadyLabel:     podReady(pod),
+		podNodeNameLabel:  lv(pod.Spec.NodeName),
+		podHostIPLabel:    lv(pod.Status.HostIP),
 	}
 
 	for k, v := range pod.Labels {
@@ -167,8 +183,13 @@ func (p *Pod) buildPod(pod *apiv1.Pod) *config.TargetGroup {
 	tg := &config.TargetGroup{
 		Source: podSource(pod),
 	}
+	node := p.resolveNodeRef(pod.Spec.NodeName)
+	namespace := p.resolveNamespaceRef(pod.Namespace)
 	tg.Labels = podLabels(pod)
 	tg.Labels[namespaceLabel] = lv(pod.Namespace)
+	tg.Labels[namespaceUIDLabel] = lv(string(namespace.ObjectMeta.UID))
+	tg.Labels[podNodeExternalIDLabel] = lv(node.Spec.ExternalID)
+	tg.Labels[podNodeProviderIDLabel] = lv(node.Spec.ProviderID)
 
 	for _, c := range pod.Spec.Containers {
 		// If no ports are defined for the container, create an anonymous
@@ -211,4 +232,32 @@ func podReady(pod *apiv1.Pod) model.LabelValue {
 		}
 	}
 	return lv(strings.ToLower(string(api.ConditionUnknown)))
+}
+
+func (p *Pod) resolveNodeRef(name string) *apiv1.Node {
+	n := &apiv1.Node{}
+	n.Name = name
+
+	obj, exists, err := p.nodeStore.Get(n)
+	if err != nil || !exists {
+		return nil
+	}
+	if err != nil {
+		p.logger.With("err", err).Errorln("resolving nod ref failed")
+	}
+	return obj.(*apiv1.Node)
+}
+
+func (p *Pod) resolveNamespaceRef(name string) *apiv1.Namespace {
+	n := &apiv1.Namespace{}
+	n.Name = name
+
+	obj, exists, err := p.namespaceStore.Get(n)
+	if err != nil || !exists {
+		return nil
+	}
+	if err != nil {
+		p.logger.With("err", err).Errorln("resolving namespace ref failed")
+	}
+	return obj.(*apiv1.Namespace)
 }
